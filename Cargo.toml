@@ -1,0 +1,37 @@
+[package]
+name = "icard"
+version = "1.2.4"
+edition = "2021"
+description = "iCard - customize Apple Wallet card artwork and passcode keypad themes on a USB/WiFi connected iPhone"
+license = "MIT"
+build = "build.rs"
+
+[[bin]]
+name = "icard"
+path = "src/main.rs"
+
+[dependencies]
+eframe = { version = "0.33", default-features = true }
+egui = "0.33"
+egui_extras = { version = "0.33", features = ["image"] }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }
+rfd = "0.17"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+plist = "1.10"
+zip = { version = "2.6", default-features = false, features = ["deflate"] }
+flate2 = "1"
+regex = "1"
+time = { version = "0.3", features = ["formatting", "macros"] }
+base64 = "0.22"
+webbrowser = "1.2"
+anyhow = "1"
+log = "0.4"
+
+[target.'cfg(windows)'.dependencies]
+libloading = "0.8"
+
+[profile.release]
+opt-level = 3
+lto = true
+strip = true
