@@ -121,6 +121,7 @@ impl KeypadLanguage {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Language {
     English,
+    Italian,
     Spanish,
 }
 

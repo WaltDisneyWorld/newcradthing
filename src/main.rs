@@ -10,6 +10,7 @@
 
 mod activation;
 mod app;
+mod catalog;
 mod i18n;
 mod model;
 mod passthm;
@@ -22,9 +23,9 @@ fn main() -> eframe::Result<()> {
     let icon = app::load_app_icon();
 
     let viewport = egui::ViewportBuilder::default()
-        .with_title(format!("iCard Windows v{}", env!("CARGO_PKG_VERSION")))
-        .with_inner_size([1024.0, 720.0])
-        .with_min_inner_size([880.0, 600.0])
+        .with_title(format!("ProCard {}", env!("CARGO_PKG_VERSION")))
+        .with_inner_size([1180.0, 760.0])
+        .with_min_inner_size([960.0, 640.0])
         .with_icon(icon);
 
     let options = eframe::NativeOptions {
@@ -33,7 +34,7 @@ fn main() -> eframe::Result<()> {
     };
 
     eframe::run_native(
-        "iCard",
+        "ProCard",
         options,
         Box::new(|cc| {
             egui_extras::install_image_loaders(&cc.egui_ctx);

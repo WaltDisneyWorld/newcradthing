@@ -1453,29 +1453,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "dfa686283ad6dd069f105e5ab091b04c62850d3e4cf5d67debad1933f55023df"
 
 [[package]]
-name = "icard"
-version = "1.2.4"
-dependencies = [
- "anyhow",
- "base64 0.22.1",
- "eframe",
- "egui",
- "egui_extras",
- "flate2",
- "image",
- "libloading",
- "log",
- "plist",
- "regex",
- "rfd",
- "serde",
- "serde_json",
- "time",
- "webbrowser",
- "zip",
-]
-
-[[package]]
 name = "icu_collections"
 version = "2.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2544,6 +2521,29 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "985e7ec9bb745e6ce6535b544d84d6cd6f7ad8bd711c398938ae983b91a766d9"
 dependencies = [
  "unicode-ident",
+]
+
+[[package]]
+name = "procard"
+version = "0.2.0"
+dependencies = [
+ "anyhow",
+ "base64 0.22.1",
+ "eframe",
+ "egui",
+ "egui_extras",
+ "flate2",
+ "image",
+ "libloading",
+ "log",
+ "plist",
+ "regex",
+ "rfd",
+ "serde",
+ "serde_json",
+ "time",
+ "webbrowser",
+ "zip",
 ]
 
 [[package]]

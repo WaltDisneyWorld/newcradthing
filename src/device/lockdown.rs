@@ -62,7 +62,7 @@ fn recv(t: &mut dyn Transport) -> io::Result<plist::Dictionary> {
 fn req(request: &str) -> plist::Dictionary {
     let mut d = plist::Dictionary::new();
     d.insert("Request".into(), request.into());
-    d.insert("Label".into(), "iCard".into());
+    d.insert("Label".into(), "ProCard".into());
     d
 }
 

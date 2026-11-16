@@ -1,13 +1,13 @@
 [package]
-name = "icard"
-version = "1.2.4"
+name = "procard"
+version = "0.2.0"
 edition = "2021"
-description = "iCard - customize Apple Wallet card artwork and passcode keypad themes on a USB/WiFi connected iPhone"
+description = "ProCard - a guided studio for customizing Apple Wallet card artwork and passcode keypad themes on a USB/WiFi connected iPhone"
 license = "MIT"
 build = "build.rs"
 
 [[bin]]
-name = "icard"
+name = "procard"
 path = "src/main.rs"
 
 [dependencies]
