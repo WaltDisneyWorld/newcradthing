@@ -37,11 +37,13 @@ impl Activation {
         }
     }
 
+    #[allow(dead_code)]
     pub fn is_active(&self) -> bool {
         self.activated && validate(&self.code)
     }
 
     /// Try to activate with a code. Returns true on success and persists.
+    #[allow(dead_code)]
     pub fn try_activate(&mut self, code: &str) -> bool {
         if validate(code) {
             self.activated = true;
@@ -54,9 +56,9 @@ impl Activation {
     }
 }
 
-const ALPHABET: &[u8; 32] = b"ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+pub(crate) const ALPHABET: &[u8; 32] = b"ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
 
-fn normalize(code: &str) -> String {
+pub(crate) fn normalize(code: &str) -> String {
     code.chars()
         .filter(|c| c.is_ascii_alphanumeric())
         .map(|c| c.to_ascii_uppercase())
@@ -66,7 +68,7 @@ fn normalize(code: &str) -> String {
 /// A code is 16 base-32 symbols (grouped as XXXX-XXXX-XXXX-XXXX). The final
 /// symbol is a checksum over the first 15, so the gate can verify a code offline
 /// without a key list.
-fn validate(code: &str) -> bool {
+pub(crate) fn validate(code: &str) -> bool {
     let norm = normalize(code);
     if norm.len() != 16 {
         return false;

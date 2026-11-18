@@ -96,6 +96,12 @@ pub struct IcardApp {
     ctx: egui::Context,
     settings: Settings,
     activation: Activation,
+    licenses: crate::license::LicenseStore,
+    hwid: String,
+    show_manager: bool,
+    manager_unlocked: bool,
+    admin_input: String,
+    gen_label: String,
 
     tab: Tab,
     logs_unread: bool,
@@ -171,6 +177,12 @@ impl IcardApp {
             ctx: cc.egui_ctx.clone(),
             settings,
             activation,
+            licenses: crate::license::LicenseStore::load(),
+            hwid: crate::license::hwid(),
+            show_manager: false,
+            manager_unlocked: false,
+            admin_input: String::new(),
+            gen_label: String::new(),
             tab: Tab::Studio,
             logs_unread: false,
             devices: Vec::new(),
@@ -246,9 +258,14 @@ impl IcardApp {
         self.devices.get(self.selected_device)
     }
 
-    /// Gate check: device-mutating actions require activation.
+    /// True when an activated license is bound to THIS machine's HWID.
+    pub(crate) fn license_ok(&self) -> bool {
+        self.activation.activated && self.licenses.is_active(&self.activation.code, &self.hwid)
+    }
+
+    /// Gate check: device-mutating actions require an HWID-bound license.
     fn gated(&mut self) -> bool {
-        if self.activation.is_active() {
+        if self.license_ok() {
             true
         } else {
             let s = self.strings();

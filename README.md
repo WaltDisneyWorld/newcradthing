@@ -70,11 +70,25 @@ ready `ProCard-win64` bundle with both). On Windows, install 64-bit iTunes or th
 standalone **Apple Mobile Device Support** first, connect the iPhone by USB and
 tap *Trust This Computer* once.
 
-## Activation
+## Licensing (HWID-bound)
 
-Device-writing actions are gated behind a **local** activation code (checked
-entirely offline; state in `%LOCALAPPDATA%\ProCard\activation.json`). The code is
-16 base-32 symbols with a trailing checksum. Valid demo codes:
+Device-writing actions are gated behind a **local, offline** license. A license
+key is 16 base-32 symbols with a trailing checksum, and on activation it binds to
+this machine's **HWID** (a hashed hardware fingerprint). State lives in
+`%LOCALAPPDATA%\ProCard\{activation.json, licenses.json}`.
+
+Open **License…** in the sidebar to:
+
+- see this machine's **HWID** (Copy),
+- **Activate** a key (binds it here), or **Reset my HWID** to unbind,
+- unlock the **admin** area to **generate**, **view**, **reset HWID**, **revoke
+  / restore** and **delete** licenses in a table.
+
+A key bound to another machine is refused until its HWID is reset.
+
+**Admin code** (unlocks the manager): `PRDC-ARDA-DMNK-Y239`
+
+**Demo license keys** (activate / bind on first use):
 
 ```
 ABCD-EFGH-JKLM-NPQ3

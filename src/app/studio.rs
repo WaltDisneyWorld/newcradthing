@@ -1,13 +1,14 @@
-//! ProCard's redesigned studio interface: a sidebar, a guided step ribbon, a
-//! searchable artwork browser, a large card preview with zoom + drag crop, and
-//! restyled passcode / logs panels. Everything the engine exposes, in a layout
-//! that reads top-to-bottom like a guided flow.
+//! ProCard's studio interface: sidebar, guided step ribbon, searchable artwork
+//! browser, large card preview with zoom + drag crop, passcode/logs panels, and
+//! the HWID-bound License Manager. Icons are drawn or plain text (no emoji font
+//! dependency), so nothing renders as tofu.
 
 use std::path::PathBuf;
 
 use egui::{Color32, CornerRadius, RichText, Sense, Stroke, StrokeKind, Vec2};
 
 use super::{IcardApp, Tab};
+use crate::license::{LicenseStatus, ADMIN_CODE};
 use crate::model::{KeypadLanguage, Language, TransportMode};
 use crate::wallet::airlift;
 
@@ -22,6 +23,7 @@ const TEXT: Color32 = Color32::from_rgb(228, 232, 238);
 const MUTED: Color32 = Color32::from_rgb(150, 158, 170);
 const GOOD: Color32 = Color32::from_rgb(90, 200, 130);
 const WARN: Color32 = Color32::from_rgb(230, 170, 90);
+const BAD: Color32 = Color32::from_rgb(220, 110, 110);
 
 impl IcardApp {
     fn tr(&self, en: &'static str, it: &'static str) -> &'static str {
@@ -54,11 +56,12 @@ impl IcardApp {
 
         self.render_help(ctx);
         self.render_activation(ctx);
+        self.render_manager(ctx);
     }
 
     fn install_theme(&self, ctx: &egui::Context) {
         if ctx.style().visuals.panel_fill == BG {
-            return; // already themed
+            return;
         }
         let mut v = egui::Visuals::dark();
         v.panel_fill = BG;
@@ -86,7 +89,7 @@ impl IcardApp {
     fn render_sidebar(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             logo_mark(ui);
-            ui.add_space(2.0);
+            ui.add_space(4.0);
             ui.vertical(|ui| {
                 ui.label(RichText::new("ProCard").size(22.0).strong().color(TEXT));
                 ui.label(RichText::new(format!("Wallet Studio · v{}", env!("CARGO_PKG_VERSION"))).size(11.0).color(MUTED));
@@ -94,19 +97,16 @@ impl IcardApp {
         });
         ui.add_space(14.0);
 
-        let (studio, passcode, logs) = (
-            self.tr("Card Studio", "Studio Carte"),
-            self.tr("Passcode Theme", "Tema Tastierino"),
-            self.tr("Activity Log", "Registro"),
-        );
-        if nav_item(ui, "🎨", studio, matches!(self.tab, Tab::Studio)) {
+        let studio = self.tr("Card Studio", "Studio Carte");
+        let passcode = self.tr("Passcode Theme", "Tema Tastierino");
+        let logs = self.tr("Activity Log", "Registro");
+        if nav_item(ui, studio, matches!(self.tab, Tab::Studio), false) {
             self.tab = Tab::Studio;
         }
-        if nav_item(ui, "🔢", passcode, matches!(self.tab, Tab::Passcode)) {
+        if nav_item(ui, passcode, matches!(self.tab, Tab::Passcode), false) {
             self.tab = Tab::Passcode;
         }
-        let logs_label = if self.logs_unread { format!("{logs}  ●") } else { logs.to_string() };
-        if nav_item(ui, "📜", &logs_label, matches!(self.tab, Tab::Logs)) {
+        if nav_item(ui, logs, matches!(self.tab, Tab::Logs), self.logs_unread) {
             self.tab = Tab::Logs;
             self.logs_unread = false;
         }
@@ -115,7 +115,6 @@ impl IcardApp {
         section_rule(ui);
         ui.add_space(10.0);
 
-        // Device card
         ui.label(RichText::new(self.tr("DEVICE", "DISPOSITIVO")).size(11.0).strong().color(MUTED));
         ui.add_space(6.0);
         self.device_card(ui);
@@ -125,124 +124,106 @@ impl IcardApp {
         ui.add_space(6.0);
         self.saved_cards_list(ui);
 
-        // Footer pinned to the bottom
         ui.with_layout(egui::Layout::bottom_up(egui::Align::LEFT), |ui| {
             ui.add_space(4.0);
             ui.horizontal(|ui| {
-                lang_toggle(ui, &mut self.settings.language, |app_lang| {
-                    let _ = app_lang;
-                });
-                let changed_lang = self.sync_language();
-                if changed_lang {
+                let mut lang = self.settings.language;
+                lang_toggle(ui, &mut lang);
+                if lang != self.settings.language {
+                    self.settings.language = lang;
+                    self.status = crate::i18n::Strings::new(lang).ready().to_string();
                     crate::saved_cards::save_settings(&self.settings);
                 }
                 ui.add_space(6.0);
-                if ui.add(pill_button("❔", self.tr("Help", "Aiuto"), PANEL2)).clicked() {
+                if ui.add(text_button(self.tr("Help", "Aiuto"), PANEL2)).clicked() {
                     self.show_help = true;
                 }
             });
             ui.add_space(6.0);
-            // Activation chip
-            if self.activation.is_active() {
-                chip(ui, &format!("✔ {}", self.tr("Activated", "Attivato")), GOOD);
-            } else if ui.add(pill_button("🔑", self.tr("Activate license", "Attiva licenza"), ACCENT2.linear_multiply(0.6))).clicked() {
-                self.show_activation = true;
+            // License status / manager
+            ui.horizontal(|ui| {
+                if self.license_ok() {
+                    chip(ui, self.tr("Licensed", "Con licenza"), GOOD);
+                } else {
+                    chip(ui, self.tr("Not licensed", "Senza licenza"), WARN);
+                }
+                if ui.add(text_button(self.tr("License…", "Licenza…"), ACCENT2.linear_multiply(0.55))).clicked() {
+                    self.show_manager = true;
+                }
+            });
+        });
+    }
+
+    fn device_card(&mut self, ui: &mut egui::Ui) {
+        egui::Frame::new().fill(PANEL2).corner_radius(10).inner_margin(10).show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            let has = self.selected_device().is_some();
+            ui.horizontal(|ui| {
+                let (rect, _) = ui.allocate_exact_size(Vec2::splat(10.0), Sense::hover());
+                ui.painter().circle_filled(rect.center(), 5.0, if has { GOOD } else { Color32::from_gray(90) });
+                let name = self
+                    .selected_device()
+                    .map(|d| d.label())
+                    .unwrap_or_else(|| self.tr("No iPhone connected", "Nessun iPhone").to_string());
+                ui.label(RichText::new(name).color(if has { TEXT } else { MUTED }));
+            });
+            if let Some(d) = self.selected_device() {
+                if !d.ios_version.is_empty() {
+                    ui.label(RichText::new(format!("iOS {}", d.ios_version)).size(11.0).color(MUTED));
+                }
+            }
+            ui.add_space(6.0);
+            ui.horizontal(|ui| {
+                let mut mode = self.settings.transport;
+                egui::ComboBox::from_id_salt("transport")
+                    .width(120.0)
+                    .selected_text(RichText::new(transport_label(self, mode)).size(12.0))
+                    .show_ui(ui, |ui| {
+                        for m in TransportMode::all() {
+                            ui.selectable_value(&mut mode, m, transport_label(self, m));
+                        }
+                    });
+                if mode != self.settings.transport {
+                    self.settings.transport = mode;
+                    crate::saved_cards::save_settings(&self.settings);
+                    self.refresh_devices();
+                }
+                if ui.add(text_button(self.tr("Rescan", "Cerca"), PANEL)).clicked() {
+                    self.refresh_devices();
+                }
+            });
+            if self.devices.len() > 1 {
+                let mut sel = self.selected_device;
+                egui::ComboBox::from_id_salt("devpick")
+                    .width(ui.available_width())
+                    .selected_text(self.selected_device().map(|d| d.label()).unwrap_or_default())
+                    .show_ui(ui, |ui| {
+                        for (i, d) in self.devices.iter().enumerate() {
+                            ui.selectable_value(&mut sel, i, d.label());
+                        }
+                    });
+                self.selected_device = sel;
             }
         });
     }
 
-    fn sync_language(&mut self) -> bool {
-        // lang_toggle already mutated settings.language; just report truthy to
-        // trigger a save when the status text should refresh.
-        self.status = crate::i18n::Strings::new(self.settings.language).ready().to_string();
-        true
-    }
-
-    fn device_card(&mut self, ui: &mut egui::Ui) {
-        egui::Frame::new()
-            .fill(PANEL2)
-            .corner_radius(10)
-            .inner_margin(10)
-            .show(ui, |ui| {
-                ui.set_width(ui.available_width());
-                let has = self.selected_device().is_some();
-                ui.horizontal(|ui| {
-                    let (rect, _) = ui.allocate_exact_size(Vec2::splat(10.0), Sense::hover());
-                    ui.painter().circle_filled(rect.center(), 5.0, if has { GOOD } else { Color32::from_gray(90) });
-                    let name = self
-                        .selected_device()
-                        .map(|d| d.label())
-                        .unwrap_or_else(|| self.tr("No iPhone connected", "Nessun iPhone").to_string());
-                    ui.label(RichText::new(name).color(if has { TEXT } else { MUTED }));
-                });
-                if let Some(d) = self.selected_device() {
-                    if !d.ios_version.is_empty() {
-                        ui.label(RichText::new(format!("iOS {}", d.ios_version)).size(11.0).color(MUTED));
-                    }
-                }
-                ui.add_space(6.0);
-                ui.horizontal(|ui| {
-                    // transport selector
-                    let mut mode = self.settings.transport;
-                    egui::ComboBox::from_id_salt("transport")
-                        .width(120.0)
-                        .selected_text(RichText::new(transport_label(self, mode)).size(12.0))
-                        .show_ui(ui, |ui| {
-                            for m in TransportMode::all() {
-                                ui.selectable_value(&mut mode, m, transport_label(self, m));
-                            }
-                        });
-                    if mode != self.settings.transport {
-                        self.settings.transport = mode;
-                        crate::saved_cards::save_settings(&self.settings);
-                        self.refresh_devices();
-                    }
-                    if ui.add(pill_button("⟳", self.tr("Scan", "Cerca"), PANEL)).clicked() {
-                        self.refresh_devices();
-                    }
-                });
-                // device picker when more than one
-                if self.devices.len() > 1 {
-                    let mut sel = self.selected_device;
-                    egui::ComboBox::from_id_salt("devpick")
-                        .width(ui.available_width())
-                        .selected_text(self.selected_device().map(|d| d.label()).unwrap_or_default())
-                        .show_ui(ui, |ui| {
-                            for (i, d) in self.devices.iter().enumerate() {
-                                ui.selectable_value(&mut sel, i, d.label());
-                            }
-                        });
-                    self.selected_device = sel;
-                }
-            });
-    }
-
     fn saved_cards_list(&mut self, ui: &mut egui::Ui) {
-        egui::ScrollArea::vertical()
-            .id_salt("saved")
-            .max_height(150.0)
-            .auto_shrink([false, true])
-            .show(ui, |ui| {
-                if self.saved.is_empty() {
-                    ui.label(RichText::new(self.tr("Scan a card to save it here.", "Scansiona una carta per salvarla.")).size(12.0).color(MUTED));
+        egui::ScrollArea::vertical().id_salt("saved").max_height(150.0).auto_shrink([false, true]).show(ui, |ui| {
+            if self.saved.is_empty() {
+                ui.label(RichText::new(self.tr("Scan a card to save it here.", "Scansiona una carta per salvarla.")).size(12.0).color(MUTED));
+            }
+            let mut pick = None;
+            for c in &self.saved {
+                let selected = self.hash_input == c.hash;
+                let label = if c.name.is_empty() { crate::model::short_udid(&c.hash) } else { c.name.clone() };
+                if ui.add(card_row(&label, &crate::model::short_udid(&c.hash), selected)).clicked() {
+                    pick = Some(c.hash.clone());
                 }
-                let mut pick = None;
-                for c in &self.saved {
-                    let selected = self.hash_input == c.hash;
-                    let label = if c.name.is_empty() {
-                        crate::model::short_udid(&c.hash)
-                    } else {
-                        c.name.clone()
-                    };
-                    let resp = ui.add(card_row(&label, &crate::model::short_udid(&c.hash), selected));
-                    if resp.clicked() {
-                        pick = Some(c.hash.clone());
-                    }
-                }
-                if let Some(h) = pick {
-                    self.hash_input = h;
-                }
-            });
+            }
+            if let Some(h) = pick {
+                self.hash_input = h;
+            }
+        });
     }
 
     // ---------- studio ----------
@@ -250,17 +231,12 @@ impl IcardApp {
     fn render_studio(&mut self, ui: &mut egui::Ui) {
         self.step_ribbon(ui);
         ui.add_space(14.0);
-
         let total_w = ui.available_width();
         let left_w = (total_w * 0.52).clamp(360.0, 680.0);
         ui.horizontal_top(|ui| {
-            ui.allocate_ui(Vec2::new(left_w, ui.available_height()), |ui| {
-                self.render_preview_pane(ui);
-            });
+            ui.allocate_ui(Vec2::new(left_w, ui.available_height()), |ui| self.render_preview_pane(ui));
             ui.add_space(14.0);
-            ui.allocate_ui(Vec2::new(ui.available_width(), ui.available_height()), |ui| {
-                self.render_browser(ui);
-            });
+            ui.allocate_ui(Vec2::new(ui.available_width(), ui.available_height()), |ui| self.render_browser(ui));
         });
     }
 
@@ -280,9 +256,7 @@ impl IcardApp {
                 for (i, (label, done)) in steps.iter().enumerate() {
                     step_pill(ui, i + 1, label, *done);
                     if i < steps.len() - 1 {
-                        ui.add_space(4.0);
-                        ui.label(RichText::new("→").color(MUTED));
-                        ui.add_space(4.0);
+                        step_sep(ui);
                     }
                 }
             });
@@ -296,24 +270,15 @@ impl IcardApp {
             ui.label(RichText::new(self.tr("1536 × 969 px · drag to reposition", "1536 × 969 px · trascina per spostare")).size(11.0).color(MUTED));
             ui.add_space(8.0);
 
-            // hero preview
             let avail = ui.available_width();
             let size = Vec2::new(avail, avail * (969.0_f32 / 1536.0));
             let (rect, resp) = ui.allocate_exact_size(size, Sense::drag());
             let painter = ui.painter_at(rect);
             painter.rect_filled(rect, CornerRadius::same(16), CARD);
             if let Some(tex) = &self.preview_tex {
-                egui::Image::new(egui::load::SizedTexture::new(tex.id(), rect.size()))
-                    .corner_radius(16)
-                    .paint_at(ui, rect);
+                egui::Image::new(egui::load::SizedTexture::new(tex.id(), rect.size())).corner_radius(16).paint_at(ui, rect);
             } else {
-                painter.text(
-                    rect.center(),
-                    egui::Align2::CENTER_CENTER,
-                    self.tr("Pick artwork or upload an image", "Scegli una grafica o carica un'immagine"),
-                    egui::FontId::proportional(15.0),
-                    MUTED,
-                );
+                painter.text(rect.center(), egui::Align2::CENTER_CENTER, self.tr("Pick artwork or upload an image", "Scegli una grafica o carica un'immagine"), egui::FontId::proportional(15.0), MUTED);
             }
             painter.rect_stroke(rect, CornerRadius::same(16), Stroke::new(1.0_f32, Color32::from_gray(60)), StrokeKind::Inside);
             if resp.dragged() && self.work.is_some() {
@@ -323,7 +288,6 @@ impl IcardApp {
                 self.preview_dirty = true;
             }
 
-            // zoom
             if self.source.is_some() {
                 ui.add_space(8.0);
                 ui.horizontal(|ui| {
@@ -333,7 +297,7 @@ impl IcardApp {
                         self.zoom = z;
                         self.preview_dirty = true;
                     }
-                    if ui.add(pill_button("⟲", self.tr("Reset", "Reimposta"), PANEL2)).clicked() {
+                    if ui.add(text_button(self.tr("Reset", "Reimposta"), PANEL2)).clicked() {
                         self.zoom = 1.0;
                         self.crop_offset = Vec2::new(0.5, 0.5);
                         self.preview_dirty = true;
@@ -345,21 +309,16 @@ impl IcardApp {
             section_rule(ui);
             ui.add_space(10.0);
 
-            // target hash row
             ui.label(RichText::new(self.tr("Target card", "Carta di destinazione")).size(12.0).color(MUTED));
             let hash_hint = self.tr("Scan or paste the pass hash", "Scansiona o incolla l'hash");
             ui.horizontal(|ui| {
-                let w = ui.available_width() - 90.0;
-                ui.add(
-                    egui::TextEdit::singleline(&mut self.hash_input)
-                        .hint_text(hash_hint)
-                        .desired_width(w),
-                );
+                let w = ui.available_width() - 92.0;
+                ui.add(egui::TextEdit::singleline(&mut self.hash_input).hint_text(hash_hint).desired_width(w));
                 if self.scanning {
                     if ui.add(danger_button(self.tr("Stop", "Ferma"))).clicked() {
                         self.stop_scan();
                     }
-                } else if ui.add(pill_button("🔍", self.tr("Scan", "Cerca"), ACCENT2.linear_multiply(0.6))).clicked() {
+                } else if ui.add(text_button(self.tr("Scan", "Cerca"), ACCENT2.linear_multiply(0.6))).clicked() {
                     self.start_scan();
                 }
             });
@@ -371,14 +330,13 @@ impl IcardApp {
             }
 
             ui.add_space(12.0);
-            // apply bar
             let can_apply = !self.busy && self.source.is_some() && !self.hash_input.trim().is_empty() && self.selected_device().is_some();
             let can_restore = !self.busy && airlift::restore_available(&self.hash_input) && self.selected_device().is_some();
             ui.horizontal(|ui| {
-                if ui.add_enabled(can_apply, primary_button(&format!("⬆  {}", self.tr("Apply to iPhone", "Applica all'iPhone")))).clicked() {
+                if ui.add_enabled(can_apply, primary_button(self.tr("Apply to iPhone", "Applica all'iPhone"))).clicked() {
                     self.apply_card_skin();
                 }
-                if ui.add_enabled(can_restore, pill_button("↩", self.tr("Restore original", "Ripristina"), PANEL2)).clicked() {
+                if ui.add_enabled(can_restore, text_button(self.tr("Restore original", "Ripristina"), PANEL2)).clicked() {
                     self.restore_original();
                 }
             });
@@ -393,11 +351,8 @@ impl IcardApp {
             ui.horizontal(|ui| {
                 ui.label(RichText::new(self.tr("Artwork", "Grafiche")).strong().size(15.0));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.add(pill_button("📂", self.tr("Upload", "Carica"), ACCENT.linear_multiply(0.45))).clicked() {
-                        if let Some(path) = rfd::FileDialog::new()
-                            .add_filter("Images", &["png", "jpg", "jpeg", "webp"])
-                            .pick_file()
-                        {
+                    if ui.add(text_button(self.tr("Upload image", "Carica"), ACCENT.linear_multiply(0.45))).clicked() {
+                        if let Some(path) = rfd::FileDialog::new().add_filter("Images", &["png", "jpg", "jpeg", "webp"]).pick_file() {
                             self.load_image(path);
                         }
                     }
@@ -419,7 +374,6 @@ impl IcardApp {
             ui.add(egui::TextEdit::singleline(&mut self.art_search).hint_text(search_hint).desired_width(search_w));
             ui.add_space(8.0);
 
-            // pack chips (hidden while searching)
             let searching = !self.art_search.trim().is_empty();
             if !searching {
                 let packs: Vec<(usize, String, Color32)> = self
@@ -431,8 +385,7 @@ impl IcardApp {
                     .collect();
                 ui.horizontal_wrapped(|ui| {
                     for (i, name, accent) in packs {
-                        let selected = self.selected_pack == i;
-                        if ui.add(pack_chip(&name, accent, selected)).clicked() {
+                        if ui.add(pack_chip(&name, accent, self.selected_pack == i)).clicked() {
                             self.selected_pack = i;
                         }
                     }
@@ -440,7 +393,6 @@ impl IcardApp {
                 ui.add_space(10.0);
             }
 
-            // Build the list of arts to show (snapshot to avoid borrow clashes).
             let query = self.art_search.trim().to_lowercase();
             let mut items: Vec<(String, String, PathBuf)> = Vec::new();
             for (pi, pack) in self.catalog.packs.iter().enumerate() {
@@ -471,9 +423,7 @@ impl IcardApp {
                             let p = ui.painter_at(rect);
                             p.rect_filled(rect, CornerRadius::same(10), CARD);
                             if let Some(tex) = tex {
-                                egui::Image::new(egui::load::SizedTexture::new(tex.id(), rect.size()))
-                                    .corner_radius(10)
-                                    .paint_at(ui, rect);
+                                egui::Image::new(egui::load::SizedTexture::new(tex.id(), rect.size())).corner_radius(10).paint_at(ui, rect);
                             }
                             let stroke = if selected { Stroke::new(2.5_f32, ACCENT) } else { Stroke::new(1.0_f32, Color32::from_gray(55)) };
                             p.rect_stroke(rect, CornerRadius::same(10), stroke, StrokeKind::Outside);
@@ -490,9 +440,7 @@ impl IcardApp {
                 });
                 if items.is_empty() {
                     ui.add_space(16.0);
-                    ui.vertical_centered(|ui| {
-                        ui.label(RichText::new(self.tr("No matches.", "Nessun risultato.")).color(MUTED));
-                    });
+                    ui.vertical_centered(|ui| ui.label(RichText::new(self.tr("No matches.", "Nessun risultato.")).color(MUTED)));
                 }
             });
         });
@@ -506,7 +454,6 @@ impl IcardApp {
             ui.label(RichText::new(self.tr("Passcode keypad theme", "Tema del tastierino")).strong().size(17.0));
             ui.label(RichText::new(self.tr("Custom lockscreen keypad from a .passthm package (Cowabunga / Nugget format).", "Tastierino personalizzato da un pacchetto .passthm (formato Cowabunga / Nugget).")).size(12.0).color(MUTED));
             ui.add_space(12.0);
-
             ui.columns(2, |cols| {
                 let ui = &mut cols[0];
                 if ui.add(primary_button(self.tr("Choose .passthm…", "Scegli .passthm…"))).clicked() {
@@ -546,7 +493,7 @@ impl IcardApp {
 
                 ui.add_space(14.0);
                 let can = !self.busy && self.theme.is_some() && self.selected_device().is_some();
-                if ui.add_enabled(can, primary_button(&format!("⬆  {}", self.tr("Apply theme", "Applica tema")))).clicked() {
+                if ui.add_enabled(can, primary_button(self.tr("Apply theme", "Applica tema"))).clicked() {
                     self.apply_theme();
                 }
                 ui.label(RichText::new(self.tr("After applying, lock your iPhone to see the new keypad.", "Dopo l'applicazione, blocca l'iPhone per vedere il tastierino.")).size(11.0).color(MUTED));
@@ -567,15 +514,15 @@ impl IcardApp {
             ui.horizontal(|ui| {
                 ui.label(RichText::new(self.tr("Activity log", "Registro attività")).strong().size(15.0));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.add(pill_button("🗑", self.tr("Clear", "Pulisci"), PANEL2)).clicked() {
+                    if ui.add(text_button(self.tr("Clear", "Pulisci"), PANEL2)).clicked() {
                         self.logs.clear();
                     }
-                    if ui.add(pill_button("💾", self.tr("Save", "Salva"), PANEL2)).clicked() {
+                    if ui.add(text_button(self.tr("Save", "Salva"), PANEL2)).clicked() {
                         if let Some(path) = rfd::FileDialog::new().set_file_name("procard-diagnostics.log").add_filter("Log", &["log", "txt"]).save_file() {
                             let _ = std::fs::write(path, self.logs.join("\n"));
                         }
                     }
-                    if ui.add(pill_button("📋", self.tr("Copy", "Copia"), PANEL2)).clicked() {
+                    if ui.add(text_button(self.tr("Copy", "Copia"), PANEL2)).clicked() {
                         ui.ctx().copy_text(self.logs.join("\n"));
                     }
                 });
@@ -595,8 +542,6 @@ impl IcardApp {
         });
     }
 
-    // ---------- status ----------
-
     fn render_status(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             if self.busy {
@@ -604,7 +549,7 @@ impl IcardApp {
             }
             ui.label(RichText::new(&self.status).size(12.0).color(TEXT));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let (c, _) = if self.support.is_ready() { (GOOD, true) } else { (MUTED, false) };
+                let c = if self.support.is_ready() { GOOD } else { MUTED };
                 ui.label(RichText::new(self.support.describe()).size(11.0).color(c));
             });
         });
@@ -618,10 +563,7 @@ impl IcardApp {
         }
         let mut open = true;
         egui::Window::new(self.tr("Setup & help", "Configurazione e aiuto"))
-            .collapsible(false)
-            .resizable(false)
-            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
-            .open(&mut open)
+            .collapsible(false).resizable(false).anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0]).open(&mut open)
             .show(ctx, |ui| {
                 ui.set_max_width(460.0);
                 ui.label(RichText::new(self.support.describe()).size(12.0).color(if self.support.is_ready() { GOOD } else { WARN }));
@@ -639,33 +581,228 @@ impl IcardApp {
         }
         let mut open = true;
         egui::Window::new(self.tr("Activate license", "Attiva licenza"))
-            .collapsible(false)
-            .resizable(false)
-            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
-            .open(&mut open)
+            .collapsible(false).resizable(false).anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0]).open(&mut open)
             .show(ctx, |ui| {
-                ui.set_max_width(340.0);
-                ui.label(RichText::new(self.tr("Enter your activation code", "Inserisci il codice di attivazione")).size(12.0).color(MUTED));
-                ui.add(egui::TextEdit::singleline(&mut self.activation_input).hint_text("XXXX-XXXX-XXXX-XXXX").desired_width(260.0));
+                ui.set_max_width(360.0);
+                ui.label(RichText::new(format!("{}: {}", self.tr("This device", "Questo dispositivo"), self.hwid)).size(11.0).color(MUTED));
+                ui.add_space(4.0);
+                ui.label(RichText::new(self.tr("Enter your license code", "Inserisci il codice di licenza")).size(12.0).color(MUTED));
+                ui.add(egui::TextEdit::singleline(&mut self.activation_input).hint_text("XXXX-XXXX-XXXX-XXXX").desired_width(280.0));
                 ui.add_space(6.0);
-                if ui.add(primary_button(self.tr("Activate", "Attiva"))).clicked() {
-                    let code = self.activation_input.clone();
-                    if self.activation.try_activate(&code) {
-                        self.activation_msg = self.tr("Activation successful.", "Attivazione riuscita.").to_string();
-                        self.show_activation = false;
-                        self.log("Activation successful (local gate).");
-                    } else {
-                        self.activation_msg = self.tr("Invalid activation code.", "Codice non valido.").to_string();
+                ui.horizontal(|ui| {
+                    if ui.add(primary_button(self.tr("Activate", "Attiva"))).clicked() {
+                        self.do_activate();
                     }
-                }
+                    if ui.add(text_button(self.tr("License Manager…", "Gestione licenze…"), PANEL2)).clicked() {
+                        self.show_manager = true;
+                        self.show_activation = false;
+                    }
+                });
                 if !self.activation_msg.is_empty() {
-                    let ok = self.activation.is_active();
-                    ui.label(RichText::new(&self.activation_msg).color(if ok { GOOD } else { Color32::from_rgb(220, 110, 110) }));
+                    let ok = self.license_ok();
+                    ui.label(RichText::new(&self.activation_msg).color(if ok { GOOD } else { BAD }));
                 }
             });
         if !open {
             self.show_activation = false;
         }
+    }
+
+    fn do_activate(&mut self) {
+        let code = self.activation_input.clone();
+        match self.licenses.activate(&code, &self.hwid) {
+            Ok(_) => {
+                self.activation.activated = true;
+                self.activation.code = crate::activation::normalize(&code);
+                self.activation.save();
+                self.activation_msg = self.tr("Activation successful.", "Attivazione riuscita.").to_string();
+                self.show_activation = false;
+                self.log("License activated and bound to this device (HWID).");
+            }
+            Err(e) => {
+                self.activation_msg = e;
+            }
+        }
+    }
+
+    fn render_manager(&mut self, ctx: &egui::Context) {
+        if !self.show_manager {
+            return;
+        }
+        let mut open = true;
+        egui::Window::new(self.tr("License Manager", "Gestione licenze"))
+            .collapsible(false).resizable(true).default_width(560.0).anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0]).open(&mut open)
+            .show(ctx, |ui| {
+                ui.set_max_width(640.0);
+
+                // HWID + current status
+                egui::Frame::new().fill(PANEL2).corner_radius(10).inner_margin(10).show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new(self.tr("This machine HWID", "HWID di questo PC")).size(12.0).color(MUTED));
+                        ui.label(RichText::new(&self.hwid).monospace().color(ACCENT));
+                        if ui.add(text_button(self.tr("Copy", "Copia"), PANEL)).clicked() {
+                            ui.ctx().copy_text(self.hwid.clone());
+                        }
+                    });
+                    let licensed = self.license_ok();
+                    ui.horizontal(|ui| {
+                        chip(ui, if licensed { self.tr("Licensed on this device", "Con licenza su questo PC") } else { self.tr("Not licensed here", "Nessuna licenza qui") }, if licensed { GOOD } else { WARN });
+                        if licensed {
+                            ui.label(RichText::new(crate::license::group(&self.activation.code)).monospace().size(12.0).color(MUTED));
+                        }
+                    });
+                });
+
+                ui.add_space(8.0);
+
+                // Activation row
+                egui::Frame::new().fill(CARD).corner_radius(10).inner_margin(10).show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    ui.label(RichText::new(self.tr("Activate a license on this device", "Attiva una licenza su questo PC")).size(12.0).strong());
+                    ui.horizontal(|ui| {
+                        ui.add(egui::TextEdit::singleline(&mut self.activation_input).hint_text("XXXX-XXXX-XXXX-XXXX").desired_width(240.0));
+                        if ui.add(primary_button(self.tr("Activate", "Attiva"))).clicked() {
+                            self.do_activate();
+                        }
+                        if self.license_ok() && ui.add(danger_button(self.tr("Reset my HWID", "Reimposta HWID"))).clicked() {
+                            let code = self.activation.code.clone();
+                            self.licenses.reset_hwid(&code);
+                            self.activation.activated = false;
+                            self.activation.save();
+                            self.log("HWID reset for the active license.");
+                            self.status = self.tr("HWID reset. Re-activate to bind again.", "HWID reimpostato. Riattiva per associare.").to_string();
+                        }
+                    });
+                    if !self.activation_msg.is_empty() {
+                        ui.label(RichText::new(&self.activation_msg).size(12.0).color(if self.license_ok() { GOOD } else { BAD }));
+                    }
+                });
+
+                ui.add_space(8.0);
+                section_rule(ui);
+                ui.add_space(8.0);
+
+                // Admin area
+                if !self.manager_unlocked {
+                    ui.label(RichText::new(self.tr("Admin — unlock to generate & manage licenses", "Admin — sblocca per generare e gestire")).size(12.0).strong());
+                    let admin_hint = self.tr("Admin code", "Codice admin");
+                    ui.horizontal(|ui| {
+                        ui.add(egui::TextEdit::singleline(&mut self.admin_input).hint_text(admin_hint).desired_width(220.0));
+                        if ui.add(primary_button(self.tr("Unlock", "Sblocca"))).clicked() {
+                            if crate::activation::normalize(&self.admin_input) == ADMIN_CODE {
+                                self.manager_unlocked = true;
+                                self.log("License Manager unlocked (admin).");
+                            } else {
+                                self.status = self.tr("Invalid admin code.", "Codice admin non valido.").to_string();
+                            }
+                        }
+                    });
+                } else {
+                    self.render_admin_table(ui);
+                }
+            });
+        if !open {
+            self.show_manager = false;
+        }
+    }
+
+    fn render_admin_table(&mut self, ui: &mut egui::Ui) {
+        let gen_hint = self.tr("Label (optional)", "Etichetta");
+        ui.horizontal(|ui| {
+            ui.label(RichText::new(self.tr("Generate new license", "Genera nuova licenza")).size(12.0).strong());
+            ui.add(egui::TextEdit::singleline(&mut self.gen_label).hint_text(gen_hint).desired_width(180.0));
+            if ui.add(primary_button(self.tr("Generate", "Genera"))).clicked() {
+                let label = self.gen_label.clone();
+                let key = self.licenses.generate(&label);
+                self.gen_label.clear();
+                self.log(format!("Generated license {}", crate::license::group(&key)));
+            }
+        });
+        ui.add_space(8.0);
+
+        // snapshot to avoid borrow clashes
+        let hwid = self.hwid.clone();
+        let records: Vec<crate::license::LicenseRecord> = self.licenses.records.clone();
+        ui.label(RichText::new(format!("{} {}", records.len(), self.tr("license(s)", "licenze"))).size(11.0).color(MUTED));
+        ui.add_space(4.0);
+
+        enum Act {
+            Reset(String),
+            Revoke(String, bool),
+            Delete(String),
+            Copy(String),
+        }
+        let mut action: Option<Act> = None;
+
+        egui::ScrollArea::vertical().max_height(260.0).auto_shrink([false, false]).show(ui, |ui| {
+            egui::Grid::new("lictable").num_columns(4).spacing([10.0, 8.0]).striped(true).show(ui, |ui| {
+                ui.label(RichText::new(self.tr("KEY", "CHIAVE")).size(10.5).strong().color(MUTED));
+                ui.label(RichText::new(self.tr("LABEL", "ETICHETTA")).size(10.5).strong().color(MUTED));
+                ui.label(RichText::new(self.tr("STATUS / HWID", "STATO / HWID")).size(10.5).strong().color(MUTED));
+                ui.label(RichText::new(self.tr("ACTIONS", "AZIONI")).size(10.5).strong().color(MUTED));
+                ui.end_row();
+
+                for r in &records {
+                    ui.label(RichText::new(crate::license::group(&r.key)).monospace().size(12.0).color(TEXT));
+                    ui.label(RichText::new(&r.label).size(12.0).color(MUTED));
+                    let (txt, col) = match r.status(&hwid) {
+                        LicenseStatus::ActiveHere => (format!("{} · {}", tr_static(self, "Active here", "Attiva qui"), r.hwid.clone().unwrap_or_default()), GOOD),
+                        LicenseStatus::BoundElsewhere => (format!("{} · {}", tr_static(self, "Bound", "Associata"), r.hwid.clone().unwrap_or_default()), WARN),
+                        LicenseStatus::Revoked => (tr_static(self, "Revoked", "Revocata").to_string(), BAD),
+                        LicenseStatus::Free => (tr_static(self, "Free", "Libera").to_string(), MUTED),
+                    };
+                    ui.label(RichText::new(txt).size(11.0).color(col));
+                    ui.horizontal(|ui| {
+                        if ui.add(text_button(self.tr("Copy", "Copia"), PANEL2)).clicked() {
+                            action = Some(Act::Copy(r.key.clone()));
+                        }
+                        if ui.add(text_button(self.tr("Reset HWID", "Reset HWID"), PANEL2)).clicked() {
+                            action = Some(Act::Reset(r.key.clone()));
+                        }
+                        let rv = if r.revoked { self.tr("Restore", "Ripristina") } else { self.tr("Revoke", "Revoca") };
+                        if ui.add(text_button(rv, PANEL2)).clicked() {
+                            action = Some(Act::Revoke(r.key.clone(), !r.revoked));
+                        }
+                        if ui.add(danger_button("X")).clicked() {
+                            action = Some(Act::Delete(r.key.clone()));
+                        }
+                    });
+                    ui.end_row();
+                }
+            });
+        });
+
+        match action {
+            Some(Act::Reset(k)) => {
+                self.licenses.reset_hwid(&k);
+                if crate::activation::normalize(&self.activation.code) == k {
+                    self.activation.activated = false;
+                    self.activation.save();
+                }
+                self.log(format!("Reset HWID for {}", crate::license::group(&k)));
+            }
+            Some(Act::Revoke(k, v)) => {
+                self.licenses.set_revoked(&k, v);
+                self.log(format!("{} {}", if v { "Revoked" } else { "Restored" }, crate::license::group(&k)));
+            }
+            Some(Act::Delete(k)) => {
+                self.licenses.delete(&k);
+                self.log(format!("Deleted license {}", crate::license::group(&k)));
+            }
+            Some(Act::Copy(k)) => {
+                ui.ctx().copy_text(crate::license::group(&k));
+            }
+            None => {}
+        }
+    }
+}
+
+// Free helper so the table can resolve IT/EN without borrowing issues.
+fn tr_static(app: &IcardApp, en: &'static str, it: &'static str) -> &'static str {
+    match app.settings.language {
+        Language::Italian => it,
+        _ => en,
     }
 }
 
@@ -675,7 +812,7 @@ fn logo_mark(ui: &mut egui::Ui) {
     let (rect, _) = ui.allocate_exact_size(Vec2::new(34.0, 34.0), Sense::hover());
     let p = ui.painter_at(rect);
     p.rect_filled(rect, CornerRadius::same(9), ACCENT);
-    p.rect_filled(rect.shrink2(Vec2::new(0.0, 10.0)).translate(Vec2::new(0.0, -2.0)), CornerRadius::same(3), ACCENT2.linear_multiply(0.9));
+    p.rect_filled(rect.shrink2(Vec2::new(7.0, 11.0)), CornerRadius::same(3), ACCENT2);
     p.text(rect.center(), egui::Align2::CENTER_CENTER, "P", egui::FontId::proportional(18.0), Color32::WHITE);
 }
 
@@ -685,53 +822,47 @@ fn section_rule(ui: &mut egui::Ui) {
     ui.painter().rect_filled(rect, CornerRadius::ZERO, Color32::from_gray(48));
 }
 
-fn nav_item(ui: &mut egui::Ui, icon: &str, label: &str, active: bool) -> bool {
+fn nav_item(ui: &mut egui::Ui, label: &str, active: bool, badge: bool) -> bool {
     let fill = if active { ACCENT.linear_multiply(0.22) } else { Color32::TRANSPARENT };
     let text_col = if active { ACCENT } else { TEXT };
-    let resp = ui.add(
-        egui::Button::new(RichText::new(format!("{icon}   {label}")).color(text_col).size(14.0))
-            .fill(fill)
-            .corner_radius(9)
-            .min_size(Vec2::new(ui.available_width(), 36.0)),
-    );
+    let (rect, resp) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 36.0), Sense::click());
+    let p = ui.painter_at(rect);
+    p.rect_filled(rect, CornerRadius::same(9), if resp.hovered() && !active { PANEL2 } else { fill });
+    if active {
+        let bar = egui::Rect::from_min_size(rect.left_top() + Vec2::new(0.0, 6.0), Vec2::new(3.0, rect.height() - 12.0));
+        p.rect_filled(bar, CornerRadius::same(2), ACCENT);
+    }
+    p.text(rect.left_center() + Vec2::new(14.0, 0.0), egui::Align2::LEFT_CENTER, label, egui::FontId::proportional(14.0), text_col);
+    if badge {
+        p.circle_filled(rect.right_center() - Vec2::new(12.0, 0.0), 4.0, ACCENT);
+    }
     resp.clicked()
 }
 
-fn pill_button(icon: &str, label: &str, fill: Color32) -> egui::Button<'static> {
-    egui::Button::new(RichText::new(format!("{icon} {label}")).size(12.0).color(TEXT))
-        .fill(fill)
-        .corner_radius(8)
+fn text_button(label: &str, fill: Color32) -> egui::Button<'static> {
+    egui::Button::new(RichText::new(label.to_string()).size(12.0).color(TEXT)).fill(fill).corner_radius(8)
 }
 
 fn primary_button(label: &str) -> egui::Button<'static> {
     egui::Button::new(RichText::new(label.to_string()).size(14.0).strong().color(Color32::from_rgb(8, 12, 16)))
-        .fill(ACCENT)
-        .corner_radius(9)
-        .min_size(Vec2::new(0.0, 34.0))
+        .fill(ACCENT).corner_radius(9).min_size(Vec2::new(0.0, 32.0))
 }
 
 fn danger_button(label: &str) -> egui::Button<'static> {
-    egui::Button::new(RichText::new(label.to_string()).size(13.0).color(Color32::WHITE))
-        .fill(Color32::from_rgb(190, 80, 80))
-        .corner_radius(8)
+    egui::Button::new(RichText::new(label.to_string()).size(12.0).color(Color32::WHITE)).fill(BAD).corner_radius(8)
 }
 
 fn pack_chip(name: &str, accent: Color32, selected: bool) -> egui::Button<'static> {
     let fill = if selected { accent.linear_multiply(0.35) } else { PANEL2 };
     let stroke = if selected { Stroke::new(1.5_f32, accent) } else { Stroke::NONE };
     egui::Button::new(RichText::new(name.to_string()).size(12.5).color(if selected { TEXT } else { MUTED }))
-        .fill(fill)
-        .stroke(stroke)
-        .corner_radius(14)
+        .fill(fill).stroke(stroke).corner_radius(14)
 }
 
 fn card_row<'a>(title: &'a str, sub: &'a str, selected: bool) -> impl egui::Widget + 'a {
     move |ui: &mut egui::Ui| {
         let fill = if selected { ACCENT.linear_multiply(0.18) } else { PANEL2 };
-        egui::Frame::new()
-            .fill(fill)
-            .corner_radius(8)
-            .inner_margin(egui::Margin::symmetric(10, 7))
+        egui::Frame::new().fill(fill).corner_radius(8).inner_margin(egui::Margin::symmetric(10, 7))
             .show(ui, |ui| {
                 ui.set_width(ui.available_width());
                 ui.vertical(|ui| {
@@ -745,10 +876,7 @@ fn card_row<'a>(title: &'a str, sub: &'a str, selected: bool) -> impl egui::Widg
 }
 
 fn chip(ui: &mut egui::Ui, label: &str, color: Color32) {
-    egui::Frame::new()
-        .fill(color.linear_multiply(0.18))
-        .corner_radius(14)
-        .inner_margin(egui::Margin::symmetric(12, 6))
+    egui::Frame::new().fill(color.linear_multiply(0.18)).corner_radius(14).inner_margin(egui::Margin::symmetric(12, 5))
         .show(ui, |ui| {
             ui.label(RichText::new(label).size(12.0).strong().color(color));
         });
@@ -761,20 +889,23 @@ fn step_pill(ui: &mut egui::Ui, n: usize, label: &str, done: bool) {
         let p = ui.painter_at(rect);
         p.circle_filled(rect.center(), 11.0, if done { GOOD.linear_multiply(0.3) } else { PANEL2 });
         p.circle_stroke(rect.center(), 11.0, Stroke::new(1.5_f32, accent));
-        let mark = if done { "✓".to_string() } else { n.to_string() };
-        p.text(rect.center(), egui::Align2::CENTER_CENTER, mark, egui::FontId::proportional(12.0), accent);
+        p.text(rect.center(), egui::Align2::CENTER_CENTER, n.to_string(), egui::FontId::proportional(12.0), accent);
         ui.label(RichText::new(label).size(12.5).color(if done { TEXT } else { MUTED }));
     });
 }
 
-fn lang_toggle(ui: &mut egui::Ui, lang: &mut Language, _cb: impl Fn(Language)) {
+fn step_sep(ui: &mut egui::Ui) {
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(22.0, 22.0), Sense::hover());
+    let p = ui.painter_at(rect);
+    let y = rect.center().y;
+    p.line_segment([egui::pos2(rect.left() + 2.0, y), egui::pos2(rect.right() - 2.0, y)], Stroke::new(1.5_f32, Color32::from_gray(70)));
+}
+
+fn lang_toggle(ui: &mut egui::Ui, lang: &mut Language) {
     for (l, txt) in [(Language::English, "EN"), (Language::Italian, "IT")] {
         let selected = *lang == l;
         let fill = if selected { ACCENT.linear_multiply(0.3) } else { PANEL2 };
-        if ui
-            .add(egui::Button::new(RichText::new(txt).size(12.0).color(if selected { ACCENT } else { MUTED })).fill(fill).corner_radius(7))
-            .clicked()
-        {
+        if ui.add(egui::Button::new(RichText::new(txt).size(12.0).color(if selected { ACCENT } else { MUTED })).fill(fill).corner_radius(7)).clicked() {
             *lang = l;
         }
     }
@@ -821,7 +952,8 @@ const HELP_EN: &str = "\
 4. Pick a pack artwork or Upload your own image; drag and zoom to frame it.
 5. Click Apply to iPhone, then force-close Wallet and reopen it.
 
-Device writes need a trusted device and are gated by a local activation code.";
+Device writes need a trusted device and a license bound to this machine (HWID).
+Open License... to activate, reset HWID, or manage licenses.";
 
 const HELP_IT: &str = "\
 1. Installa iTunes a 64 bit / Apple Mobile Device Support.
@@ -830,4 +962,5 @@ const HELP_IT: &str = "\
 4. Scegli una grafica o carica un'immagine; trascina e zooma per inquadrarla.
 5. Premi Applica all'iPhone, poi chiudi e riapri Wallet.
 
-Le scritture richiedono un dispositivo autorizzato e un codice di attivazione locale.";
+Le scritture richiedono un dispositivo autorizzato e una licenza associata a questo PC (HWID).
+Apri Licenza... per attivare, reimpostare l'HWID o gestire le licenze.";

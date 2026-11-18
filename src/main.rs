@@ -12,6 +12,7 @@ mod activation;
 mod app;
 mod catalog;
 mod i18n;
+mod license;
 mod model;
 mod passthm;
 mod saved_cards;
