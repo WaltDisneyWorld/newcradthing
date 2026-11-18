@@ -16,8 +16,10 @@ impl Strings {
 
     fn pick(&self, en: &'static str, es: &'static str) -> &'static str {
         match self.lang {
-            Language::English => en,
             Language::Spanish => es,
+            // Italian strings are provided by the studio UI's `tr` helper; legacy
+            // strings fall back to English for Italian.
+            Language::English | Language::Italian => en,
         }
     }
 

@@ -36,12 +36,14 @@ pub fn load_source(path: &Path) -> Result<DynamicImage> {
     Ok(img)
 }
 
-/// Cover-fit `src` to the card canvas, biased by `offset` (each component 0..=1).
-pub fn crop_to_canvas(src: &DynamicImage, offset: (f32, f32)) -> RgbaImage {
+/// Cover-fit `src` to the card canvas, biased by `offset` (each component 0..=1)
+/// and magnified by `zoom` (1.0 = fit, >1.0 = tighter crop).
+pub fn crop_to_canvas(src: &DynamicImage, offset: (f32, f32), zoom: f32) -> RgbaImage {
     let (sw, sh) = (src.width().max(1), src.height().max(1));
-    let scale = (CARD_CANVAS_W as f32 / sw as f32).max(CARD_CANVAS_H as f32 / sh as f32);
-    let scaled_w = (sw as f32 * scale).ceil() as u32;
-    let scaled_h = (sh as f32 * scale).ceil() as u32;
+    let zoom = zoom.clamp(1.0, 4.0);
+    let scale = (CARD_CANVAS_W as f32 / sw as f32).max(CARD_CANVAS_H as f32 / sh as f32) * zoom;
+    let scaled_w = (sw as f32 * scale).ceil().max(CARD_CANVAS_W as f32) as u32;
+    let scaled_h = (sh as f32 * scale).ceil().max(CARD_CANVAS_H as f32) as u32;
     let scaled = src.resize_exact(scaled_w, scaled_h, FilterType::Lanczos3);
 
     let extra_x = scaled_w.saturating_sub(CARD_CANVAS_W);
@@ -54,8 +56,13 @@ pub fn crop_to_canvas(src: &DynamicImage, offset: (f32, f32)) -> RgbaImage {
 }
 
 /// Build the full asset trio for a cropped canvas.
-pub fn prepare(src: &DynamicImage, offset: (f32, f32), source_name: String) -> Result<PreparedSkin> {
-    let canvas = crop_to_canvas(src, offset);
+pub fn prepare(
+    src: &DynamicImage,
+    offset: (f32, f32),
+    zoom: f32,
+    source_name: String,
+) -> Result<PreparedSkin> {
+    let canvas = crop_to_canvas(src, offset, zoom);
 
     let png_3x = encode_png(&canvas)?;
     let two_x = image::imageops::resize(

@@ -14,18 +14,18 @@ use crate::model::{DeviceInfo, SavedCard, Settings};
 use crate::wallet::{airlift, image_skin, scanner};
 use crate::{activation::Activation, passthm, saved_cards};
 
-/// Per-user data directory (`%LOCALAPPDATA%\AirCard` on Windows).
+/// Per-user data directory (`%LOCALAPPDATA%\ProCard` on Windows).
 pub fn data_dir() -> PathBuf {
     if let Ok(local) = std::env::var("LOCALAPPDATA") {
-        return PathBuf::from(local).join("AirCard");
+        return PathBuf::from(local).join("ProCard");
     }
     if let Ok(xdg) = std::env::var("XDG_DATA_HOME") {
-        return PathBuf::from(xdg).join("AirCard");
+        return PathBuf::from(xdg).join("ProCard");
     }
     if let Ok(home) = std::env::var("HOME") {
-        return PathBuf::from(home).join(".local").join("share").join("AirCard");
+        return PathBuf::from(home).join(".local").join("share").join("ProCard");
     }
-    std::env::temp_dir().join("AirCard")
+    std::env::temp_dir().join("ProCard")
 }
 
 /// A small procedurally-drawn app icon (an original card glyph with an "i").
@@ -76,8 +76,8 @@ pub fn load_app_icon() -> egui::IconData {
 }
 
 #[derive(PartialEq, Eq, Clone, Copy)]
-enum Tab {
-    Wallet,
+pub(crate) enum Tab {
+    Studio,
     Passcode,
     Logs,
 }
@@ -119,8 +119,17 @@ pub struct IcardApp {
     preview_tex: Option<egui::TextureHandle>,
     preview_dirty: bool,
 
+    zoom: f32,
+
     // passcode
     theme: Option<passthm::PasscodeTheme>,
+
+    // catalog / artwork browser
+    catalog: crate::catalog::Catalog,
+    selected_pack: usize,
+    selected_art: Option<String>,
+    art_search: String,
+    art_thumbs: std::collections::HashMap<String, egui::TextureHandle>,
 
     // misc UI
     logs: Vec<String>,
@@ -129,7 +138,7 @@ pub struct IcardApp {
     show_activation: bool,
     activation_input: String,
     activation_msg: String,
-    show_guide: bool,
+    show_help: bool,
 
     tx: Sender<UiMsg>,
     rx: Receiver<UiMsg>,
@@ -144,10 +153,17 @@ impl IcardApp {
         let support = device::apple::detect();
         let (tx, rx) = std::sync::mpsc::channel();
 
+        let catalog = crate::catalog::Catalog::load();
+
         let mut logs = Vec::new();
-        logs.push(format!("iCard Windows v{} initialized", env!("CARGO_PKG_VERSION")));
+        logs.push(format!("ProCard {} initialized", env!("CARGO_PKG_VERSION")));
         logs.push(support.describe());
         logs.push(format!("Loaded {} saved card(s) from database", saved.len()));
+        logs.push(format!(
+            "Catalog: {} pack(s), {} artwork(s)",
+            catalog.packs.len(),
+            catalog.total_arts()
+        ));
 
         let status = Strings::new(settings.language).ready().to_string();
 
@@ -155,7 +171,7 @@ impl IcardApp {
             ctx: cc.egui_ctx.clone(),
             settings,
             activation,
-            tab: Tab::Wallet,
+            tab: Tab::Studio,
             logs_unread: false,
             devices: Vec::new(),
             selected_device: 0,
@@ -170,14 +186,20 @@ impl IcardApp {
             crop_offset: Vec2::new(0.5, 0.5),
             preview_tex: None,
             preview_dirty: false,
+            zoom: 1.0,
             theme: None,
+            catalog,
+            selected_pack: 0,
+            selected_art: None,
+            art_search: String::new(),
+            art_thumbs: std::collections::HashMap::new(),
             logs,
             status,
             busy: false,
             show_activation: false,
             activation_input: String::new(),
             activation_msg: String::new(),
-            show_guide: false,
+            show_help: false,
             tx,
             rx,
             device_refresh_started: false,
@@ -335,6 +357,7 @@ impl IcardApp {
             return;
         }
         let offset = (self.crop_offset.x, self.crop_offset.y);
+        let zoom = self.zoom;
         let source = self.source.clone().unwrap();
         let name = self.source_name.clone();
         self.busy = true;
@@ -347,7 +370,7 @@ impl IcardApp {
             let mut logger = Self::worker_logger(tx.clone(), ctx.clone());
             let result = (|| {
                 logger("Writing card skin to iPhone...");
-                let skin = image_skin::prepare(&source, offset, name)
+                let skin = image_skin::prepare(&source, offset, zoom, name)
                     .map_err(|e| anyhow::anyhow!("Could not prepare card skin: {e}"))?;
                 airlift::write_card_skin(&device, &hash, &skin, &mut logger)
             })();
@@ -457,6 +480,8 @@ impl IcardApp {
                 self.work = Some(img.thumbnail(1024, 1024));
                 self.source = Some(img);
                 self.crop_offset = Vec2::new(0.5, 0.5);
+                self.zoom = 1.0;
+                self.selected_art = None;
                 self.preview_dirty = true;
                 self.log(format!("Prepared card skin source: {}", self.source_name));
             }
@@ -469,7 +494,7 @@ impl IcardApp {
 
     fn rebuild_preview(&mut self) {
         let Some(work) = &self.work else { return };
-        let canvas = image_skin::crop_to_canvas(work, (self.crop_offset.x, self.crop_offset.y));
+        let canvas = image_skin::crop_to_canvas(work, (self.crop_offset.x, self.crop_offset.y), self.zoom);
         // Downscale for the texture.
         let disp = image::imageops::resize(&canvas, 640, 404, image::imageops::FilterType::Triangle);
         let color = egui::ColorImage::from_rgba_unmultiplied([640, 404], disp.as_raw());
@@ -546,16 +571,7 @@ impl eframe::App for IcardApp {
             self.rebuild_preview();
         }
 
-        self.top_bar(ctx);
-        self.bottom_bar(ctx);
-
-        egui::CentralPanel::default().show(ctx, |ui| match self.tab {
-            Tab::Wallet => self.wallet_tab(ui),
-            Tab::Passcode => self.passcode_tab(ui),
-            Tab::Logs => self.logs_tab(ui),
-        });
-
-        self.activation_window(ctx);
+        self.render(ctx);
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
@@ -565,5 +581,47 @@ impl eframe::App for IcardApp {
     }
 }
 
-// UI sections live in app_ui.rs for readability.
-mod ui_sections;
+impl IcardApp {
+    /// Load a catalog artwork as the active card-skin source.
+    pub(crate) fn select_catalog_art(&mut self, art_id: &str) {
+        let path = match self.catalog.find(art_id) {
+            Some((_, art)) => self.catalog.art_path(art),
+            None => return,
+        };
+        let name = art_id.to_string();
+        match image_skin::load_source(&path) {
+            Ok(img) => {
+                self.source_name = name;
+                self.work = Some(img.thumbnail(1024, 1024));
+                self.source = Some(img);
+                self.crop_offset = Vec2::new(0.5, 0.5);
+                self.zoom = 1.0;
+                self.selected_art = Some(art_id.to_string());
+                self.preview_dirty = true;
+                self.log(format!("Selected artwork: {art_id}"));
+            }
+            Err(e) => {
+                self.log(format!("Could not load artwork {art_id}: {e}"));
+            }
+        }
+    }
+
+    /// Lazily build (and cache) a small thumbnail texture for a catalog art.
+    pub(crate) fn art_thumb(&mut self, art_id: &str, path: &std::path::Path) -> Option<egui::TextureHandle> {
+        if let Some(t) = self.art_thumbs.get(art_id) {
+            return Some(t.clone());
+        }
+        let img = image::ImageReader::open(path).ok()?.with_guessed_format().ok()?.decode().ok()?;
+        let thumb = img.thumbnail(320, 202).to_rgba8();
+        let color = egui::ColorImage::from_rgba_unmultiplied(
+            [thumb.width() as usize, thumb.height() as usize],
+            thumb.as_raw(),
+        );
+        let tex = self.ctx.load_texture(format!("thumb-{art_id}"), color, Default::default());
+        self.art_thumbs.insert(art_id.to_string(), tex.clone());
+        Some(tex)
+    }
+}
+
+// The redesigned studio UI.
+mod studio;

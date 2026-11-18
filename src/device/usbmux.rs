@@ -14,10 +14,10 @@ use crate::model::{ConnectionType, DeviceInfo};
 use super::transport::{TcpTransport, Transport};
 
 const USBMUX_TAG_PLIST: u32 = 8;
-const PROG_NAME: &str = "iCard";
+const PROG_NAME: &str = "ProCard";
 
 fn client_version() -> String {
-    format!("iCard-{}", env!("CARGO_PKG_VERSION"))
+    format!("ProCard-{}", env!("CARGO_PKG_VERSION"))
 }
 
 /// Open a fresh connection to the local usbmux endpoint.
